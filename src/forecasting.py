@@ -282,33 +282,79 @@ class ForecastingEngine:
     
     def _predict_simple(self, model_dict: Dict, horizon: int) -> pd.DataFrame:
         """Упрощенный прогноз если StatsForecast недоступен"""
+        from scipy import stats
+        
         df_train = model_dict['train_data']
         forecasts = []
         
         for unique_id in df_train['unique_id'].unique():
-            series = df_train[df_train['unique_id'] == unique_id]['y'].values
+            series_data = df_train[df_train['unique_id'] == unique_id].sort_values('ds')
+            series = series_data['y'].values
             
             if len(series) == 0:
                 continue
             
-            # Простое среднее последних значений
-            last_values = series[-7:] if len(series) >= 7 else series
-            forecast_value = np.mean(last_values)
+            # Базовое значение (среднее последних значений)
+            last_window = min(14, len(series))  # Используем последние 14 дней или все, если меньше
+            last_values = series[-last_window:]
+            base_value = np.mean(last_values)
+            
+            # Определяем тренд (линейная регрессия)
+            x = np.arange(len(series))
+            slope, intercept, r_value, p_value, std_err = stats.linregress(x, series)
+            has_trend = p_value < 0.05 and abs(slope) > std_err
+            
+            # Определяем сезонность (недельная)
+            seasonality = None
+            if len(series) >= 14:
+                # Средние значения по дням недели
+                dates = pd.to_datetime(series_data['ds'].values)
+                day_of_week = dates.dayofweek
+                
+                weekly_pattern = {}
+                for day in range(7):
+                    day_values = series[day_of_week == day]
+                    if len(day_values) > 0:
+                        weekly_pattern[day] = np.mean(day_values)
+                
+                if len(weekly_pattern) == 7:
+                    # Нормализуем паттерн относительно среднего
+                    avg_weekly = np.mean(list(weekly_pattern.values()))
+                    seasonality = {day: (weekly_pattern[day] / avg_weekly - 1.0) 
+                                 for day in weekly_pattern}
             
             # Создаем прогнозы
+            last_date = series_data['ds'].max()
             future_dates = pd.date_range(
-                start=df_train[df_train['unique_id'] == unique_id]['ds'].max() + pd.Timedelta(days=1),
+                start=last_date + pd.Timedelta(days=1),
                 periods=horizon,
                 freq='D'
             )
             
-            for date in future_dates:
+            for i, date in enumerate(future_dates):
+                forecast_value = base_value
+                
+                # Добавляем тренд
+                if has_trend:
+                    trend_component = slope * (len(series) + i)
+                    forecast_value += trend_component
+                
+                # Добавляем сезонность
+                if seasonality is not None:
+                    day_of_week = date.dayofweek
+                    if day_of_week in seasonality:
+                        seasonal_factor = seasonality[day_of_week]
+                        forecast_value = forecast_value * (1 + seasonal_factor)
+                
+                # Не допускаем отрицательных значений
+                forecast_value = max(0, forecast_value)
+                
                 forecasts.append({
                     'unique_id': unique_id,
                     'ds': date,
                     'AutoARIMA': forecast_value,
                     'ETS': forecast_value,
-                    'Naive': forecast_value
+                    'Naive': base_value  # Naive остается константой
                 })
         
         return pd.DataFrame(forecasts)
