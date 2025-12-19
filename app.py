@@ -18,6 +18,18 @@ from src.hierarchical import HierarchicalReconciliation
 from src.metrics import MetricsCalculator
 from src.visualization import Visualizer
 
+@st.cache_data(ttl=3600)
+def load_data_cached(data_dir, state, categories, limit_rows):
+    """Кэшированная загрузка данных"""
+    loader = DataLoader(data_dir)
+    sales_df, calendar_df, prices_df = loader.load_data(
+        state=state,
+        categories=categories if categories else None,
+        limit_rows=limit_rows
+    )
+    sales_long = loader.preprocess_sales_data()
+    return sales_long, calendar_df, prices_df, loader
+
 st.set_page_config(
     page_title="Система прогнозирования спроса",
     layout="wide",
@@ -55,32 +67,59 @@ with st.sidebar:
             default=["HOBBIES", "FOODS"]
         )
         limit_rows = st.number_input("Ограничение рядов", min_value=100, max_value=10000, value=1000, step=100)
+        if limit_rows > 5000:
+            st.warning(f"⚠️ Загрузка {limit_rows} рядов может занять некоторое время. Рекомендуется использовать до 5000 рядов для быстрой работы.")
     else:
         state = "CA"
         categories = ["HOBBIES", "FOODS"]
         limit_rows = 500
     
     if st.button("Загрузить данные", type="primary"):
-        with st.spinner("Загрузка данных..."):
-            try:
-                loader = DataLoader(data_dir if data_source == "M5 Dataset (Kaggle)" else "data")
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        try:
+            status_text.text("Загрузка данных...")
+            progress_bar.progress(20)
+            
+            data_dir_path = data_dir if data_source == "M5 Dataset (Kaggle)" else "data"
+            
+            if data_source == "Тестовые данные":
+                sales_long, calendar_df, prices_df, loader = load_data_cached(
+                    data_dir_path, state, categories, limit_rows
+                )
+            else:
+                loader = DataLoader(data_dir_path)
+                progress_bar.progress(40)
                 sales_df, calendar_df, prices_df = loader.load_data(
                     state=state,
                     categories=categories if categories else None,
                     limit_rows=limit_rows
                 )
-                
+                progress_bar.progress(70)
                 sales_long = loader.preprocess_sales_data()
                 
-                st.session_state.sales_data = sales_long
-                st.session_state.calendar_data = calendar_df
-                st.session_state.prices_data = prices_df
-                st.session_state.data_loader = loader
-                st.session_state.data_loaded = True
+            progress_bar.progress(90)
                 
-                st.success(f"Загружено {len(sales_long['unique_id'].unique())} временных рядов")
-            except Exception as e:
-                st.error(f"Ошибка загрузки данных: {str(e)}")
+            st.session_state.sales_data = sales_long
+            st.session_state.calendar_data = calendar_df
+            st.session_state.prices_data = prices_df
+            st.session_state.data_loader = loader
+            st.session_state.data_loaded = True
+                
+            progress_bar.progress(100)
+            status_text.empty()
+            progress_bar.empty()
+            
+            num_series = len(sales_long['unique_id'].unique())
+            num_records = len(sales_long)
+            st.success(f"Загружено {num_series} временных рядов ({num_records:,} записей)")
+        except Exception as e:
+            progress_bar.empty()
+            status_text.empty()
+            st.error(f"Ошибка загрузки данных: {str(e)}")
+            import traceback
+            st.code(traceback.format_exc())
     
     st.markdown("---")
     
